@@ -385,6 +385,10 @@ def build_episode(args: argparse.Namespace) -> int:
 
     text = clean_text(document.get("text") or document.get("raw_text") or "")
     if len(text) < 200:
+        reader_payload = download_reader_markdown(source_url)
+        document = parse_reader_payload(reader_payload, source_url)
+        text = clean_text(document.get("text") or document.get("raw_text") or "")
+    if len(text) < 200:
         raise SystemExit("Extracted article text is too short to turn into an episode")
 
     title = clean_text(document.get("title")) or fallback_title(source_url)
