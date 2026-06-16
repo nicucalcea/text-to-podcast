@@ -4,10 +4,10 @@ name: Publish article podcast episode
   workflow_dispatch:
     inputs:
       article_url:
-        description: Article URL
+        description: "Article URL"
         required: true
       language:
-        description: Optional voice override: en, ro or ru (leave blank for auto-detect)
+        description: "Optional voice override: en, ro or ru (leave blank for auto-detect)"
         required: false
         default: ""
 
