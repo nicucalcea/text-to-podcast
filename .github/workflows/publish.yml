@@ -53,15 +53,13 @@ jobs:
             git clone --depth 1 --branch gh-pages "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" gh-pages
           else
             mkdir gh-pages
-            cd gh-pages
-            git init
-            git checkout --orphan gh-pages
-            git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+            git -C gh-pages init
+            git -C gh-pages checkout --orphan gh-pages
+            git -C gh-pages remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
           fi
 
-          cd gh-pages
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C gh-pages config user.name "github-actions[bot]"
+          git -C gh-pages config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Stop on duplicate article URL
         shell: bash
