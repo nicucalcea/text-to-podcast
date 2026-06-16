@@ -17,6 +17,7 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment: JINA
     env:
       GH_TOKEN: ${{ github.token }}
@@ -39,7 +40,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install edge-tts langdetect trafilatura
+          python -m pip install edge-tts langdetect
 
       - name: Run self-check
         run: python scripts/podcast.py selfcheck

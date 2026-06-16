@@ -22,11 +22,11 @@ from xml.sax.saxutils import escape as xml_escape
 
 SUPPORTED_LANGUAGES = {"en", "ro", "ru"}
 VOICE_BY_LANGUAGE = {
-    # ponytail: keep a tiny voice map (en/ro/ru); unsupported languages fall back to English until you add more voices here.
     "en": "en-GB-SoniaNeural",
     "ro": "ro-RO-AlinaNeural",
     "ru": "ru-RU-SvetlanaNeural",
 }
+TTS_CHUNK_CHARS = 3500
 
 
 def utc_now() -> dt.datetime:
@@ -75,17 +75,13 @@ def normalize_lang_hint(value: str | None) -> str | None:
     return lowered.split("-", 1)[0]
 
 
-def detect_language(text: str, override: str | None, metadata_language: str | None) -> str:
+def detect_language(text: str, override: str | None) -> str:
     override = normalize_lang_hint(override)
     if override in SUPPORTED_LANGUAGES:
         return override
 
-    metadata_language = normalize_lang_hint(metadata_language)
-    if metadata_language in SUPPORTED_LANGUAGES:
-        return metadata_language
-
     try:
-        from langdetect import DetectorFactory, LangDetectException, detect
+        from langdetect import DetectorFactory, detect
 
         DetectorFactory.seed = 0
         detected = normalize_lang_hint(detect(text[:5000]))
@@ -118,7 +114,6 @@ def cdata(value: str) -> str:
 
 
 def paragraphs_to_html(text: str) -> str:
-    # ponytail: render extracted text as plain paragraphs; if you later want headings/lists preserved, switch extraction output and sanitize it here.
     parts = [part.strip() for part in re.split(r"\n\n+", text) if part.strip()]
     return "\n".join(
         f"<p>{html.escape(part).replace(chr(10), '<br/>')}</p>" for part in parts
@@ -168,72 +163,6 @@ def probe_duration(audio_path: Path) -> float | None:
 def build_release_tag(source_url: str, now: dt.datetime) -> str:
     digest = hashlib.sha1(source_url.encode("utf-8")).hexdigest()[:8]
     return f"episode-{now.strftime('%Y%m%d-%H%M%S')}-{digest}"
-
-
-def download_html(url: str) -> str:
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9,ro;q=0.8,ru;q=0.7",
-        },
-    )
-    with urlopen(request, timeout=30) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        return response.read().decode(charset, errors="replace")
-
-
-def download_reader_markdown(url: str) -> str:
-    reader_url = f"https://r.jina.ai/http://{url}"
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9,ro;q=0.8,ru;q=0.7",
-        "x-engine": "browser",
-        "x-no-cache": "true",
-    }
-    api_key = os.environ.get("JINA_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-        headers["x-proxy"] = "auto"
-
-    request = Request(reader_url, headers=headers)
-    with urlopen(request, timeout=60) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        return response.read().decode(charset, errors="replace")
-
-
-def markdown_to_text(markdown: str) -> str:
-    # ponytail: plain regex markdown cleanup is intentionally shallow; upgrade to a real markdown renderer if formatting fidelity ever matters.
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", markdown)
-    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^[*-]\s+", "• ", text, flags=re.MULTILINE)
-    text = re.sub(r"`{1,3}([^`]*)`{1,3}", r"\1", text)
-    text = text.replace("***", "").replace("**", "").replace("__", "")
-    text = re.sub(r"(?<!\w)[*_](?!\s)(.+?)(?<!\s)[*_](?!\w)", r"\1", text)
-    text = text.replace("_", "").replace("*", "")
-    return clean_text(html.unescape(text))
-
-
-def parse_reader_payload(payload: str, source_url: str) -> dict[str, Any]:
-    title_match = re.search(r"^Title:\s*(.+)$", payload, flags=re.MULTILINE)
-    date_match = re.search(r"^Published Time:\s*(.+)$", payload, flags=re.MULTILINE)
-    image_match = re.search(r"^Image:\s*(.+)$", payload, flags=re.MULTILINE)
-    marker = "Markdown Content:\n"
-    if marker not in payload:
-        raise ValueError("Reader fallback response did not include markdown content")
-    markdown = payload.split(marker, 1)[1].strip()
-    text = markdown_to_text(markdown)
-    return {
-        "title": clean_text(title_match.group(1) if title_match else "") or fallback_title(source_url),
-        "author": "",
-        "date": clean_text(date_match.group(1) if date_match else "") or None,
-        "language": None,
-        "image": clean_text(image_match.group(1) if image_match else "") or None,
-        "text": text,
-        "raw_text": text,
-    }
 
 
 def build_site_url(repo: str) -> str:
@@ -345,59 +274,194 @@ def source_link_html(source_url: str) -> str:
     return f'<p><a href="{escaped}">Read the original article</a></p>'
 
 
-async def synthesize_audio(text: str, voice: str, output_path: Path) -> None:
+def fetch_reader_payload(source_url: str) -> str:
+    print("Fetching article with Jina Reader...", flush=True)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9,ro;q=0.8,ru;q=0.7",
+        "x-engine": "browser",
+        "x-no-cache": "true",
+    }
+    api_key = os.environ.get("JINA_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["x-proxy"] = "auto"
+
+    request = Request(f"https://r.jina.ai/http://{source_url}", headers=headers)
+    with urlopen(request, timeout=120) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
+def markdown_to_text(markdown: str) -> str:
+    # ponytail: markdown cleanup is regex-based and intentionally shallow; if fidelity matters later, swap this for a real markdown renderer.
+    text = re.sub(r"!\[[^\]]*\]\(([^)]+)\)", "", markdown)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[*-]\s+", "• ", text, flags=re.MULTILINE)
+    text = re.sub(r"`{1,3}([^`]*)`{1,3}", r"\1", text)
+    text = text.replace("***", "").replace("**", "").replace("__", "")
+    text = re.sub(r"(?<!\w)[*_](?!\s)(.+?)(?<!\s)[*_](?!\w)", r"\1", text)
+    text = text.replace("_", "").replace("*", "")
+    return clean_text(html.unescape(text))
+
+
+def parse_reader_payload(payload: str, source_url: str) -> dict[str, Any]:
+    title_match = re.search(r"^Title:\s*(.+)$", payload, flags=re.MULTILINE)
+    date_match = re.search(r"^Published Time:\s*(.+)$", payload, flags=re.MULTILINE)
+    author_match = re.search(r"^Author:\s*(.+)$", payload, flags=re.MULTILINE)
+    image_match = re.search(r"^Image:\s*(.+)$", payload, flags=re.MULTILINE)
+    marker = "Markdown Content:\n"
+    if marker not in payload:
+        raise SystemExit("Jina Reader did not return article markdown")
+    markdown = payload.split(marker, 1)[1].strip()
+    image = clean_text(image_match.group(1) if image_match else "") or None
+    if not image:
+        inline_image = re.search(r"!\[[^\]]*\]\((https?://[^)]+)\)", markdown)
+        image = inline_image.group(1) if inline_image else None
+    text = markdown_to_text(markdown)
+    return {
+        "title": clean_text(title_match.group(1) if title_match else "") or fallback_title(source_url),
+        "author": clean_text(author_match.group(1) if author_match else ""),
+        "date": clean_text(date_match.group(1) if date_match else "") or None,
+        "image": image,
+        "text": text,
+    }
+
+
+def split_long_piece(piece: str, max_chars: int) -> list[str]:
+    sentence_parts = re.split(r"(?<=[.!?])\s+", piece)
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentence_parts:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if len(sentence) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            for index in range(0, len(sentence), max_chars):
+                chunks.append(sentence[index:index + max_chars].strip())
+            continue
+        candidate = f"{current} {sentence}".strip() if current else sentence
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            current = sentence
+    if current:
+        chunks.append(current)
+    return chunks or [piece[:max_chars].strip()]
+
+
+def split_text_for_tts(text: str, max_chars: int = TTS_CHUNK_CHARS) -> list[str]:
+    paragraphs = [part.strip() for part in re.split(r"\n\n+", text) if part.strip()]
+    if not paragraphs:
+        return [text[:max_chars]]
+
+    chunks: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        if len(paragraph) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(split_long_piece(paragraph, max_chars))
+            continue
+        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            chunks.append(current)
+            current = paragraph
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def synthesize_chunk(text: str, voice: str, output_path: Path) -> None:
     import edge_tts
 
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(str(output_path))
 
 
-def build_episode(args: argparse.Namespace) -> int:
-    import trafilatura
+def concat_audio(parts: list[Path], output_path: Path) -> None:
+    concat_file = output_path.parent / "concat.txt"
+    concat_file.write_text(
+        "".join(f"file {shlex.quote(str(part.resolve()))}\n" for part in parts),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-c",
+            "copy",
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(result.stderr.strip() or "ffmpeg failed while concatenating audio")
 
+
+def synthesize_audio(text: str, voice: str, output_path: Path) -> None:
+    chunks = split_text_for_tts(text)
+    print(f"Synthesizing audio with {len(chunks)} chunk(s)...", flush=True)
+    if len(chunks) == 1:
+        asyncio.run(synthesize_chunk(chunks[0], voice, output_path))
+        return
+
+    part_dir = output_path.parent / "tts-parts"
+    ensure_dir(part_dir)
+    part_paths: list[Path] = []
+    for index, chunk in enumerate(chunks, start=1):
+        part_path = part_dir / f"part-{index:03d}.mp3"
+        print(f"  chunk {index}/{len(chunks)}", flush=True)
+        asyncio.run(synthesize_chunk(chunk, voice, part_path))
+        part_paths.append(part_path)
+    concat_audio(part_paths, output_path)
+
+
+def fetch_article(source_url: str) -> dict[str, Any]:
+    payload = fetch_reader_payload(source_url)
+    article = parse_reader_payload(payload, source_url)
+    if len(article["text"]) < 200:
+        raise SystemExit("Extracted article text is too short to turn into an episode")
+    return article
+
+
+def build_episode(args: argparse.Namespace) -> int:
     source_url = canonicalize_url(args.url)
     out_dir = Path(args.out_dir)
     ensure_dir(out_dir)
 
-    document: dict[str, Any] | None = None
-    downloaded = trafilatura.fetch_url(source_url)
-    if not downloaded:
-        try:
-            downloaded = download_html(source_url)
-        except Exception:
-            downloaded = ""
-
-    if downloaded:
-        extracted = trafilatura.bare_extraction(
-            downloaded,
-            url=source_url,
-            favor_precision=True,
-            include_comments=False,
-            include_images=True,
-            with_metadata=True,
-        )
-        if extracted is not None:
-            document = extracted.as_dict() if hasattr(extracted, "as_dict") else extracted
-
-    if document is None:
-        reader_payload = download_reader_markdown(source_url)
-        document = parse_reader_payload(reader_payload, source_url)
-
-    text = clean_text(document.get("text") or document.get("raw_text") or "")
-    if len(text) < 200:
-        reader_payload = download_reader_markdown(source_url)
-        document = parse_reader_payload(reader_payload, source_url)
-        text = clean_text(document.get("text") or document.get("raw_text") or "")
-    if len(text) < 200:
-        raise SystemExit("Extracted article text is too short to turn into an episode")
-
-    title = clean_text(document.get("title")) or fallback_title(source_url)
-    author = clean_text(document.get("author"))
-    article_date = clean_text(document.get("date")) or None
-    metadata_language = clean_text(document.get("language")) or None
-    image_url = clean_text(document.get("image")) or None
-    language = detect_language(text, args.language, metadata_language)
+    article = fetch_article(source_url)
+    text = article["text"]
+    language = detect_language(text, args.language)
     voice = voice_for_language(language)
+    title = article["title"]
+    author = article["author"]
+    article_date = article["date"]
+    image_url = article["image"]
+
+    print(f"Title: {title}", flush=True)
+    print(f"Language: {language}", flush=True)
+    print(f"Characters: {len(text)}", flush=True)
 
     now = utc_now()
     release_tag = build_release_tag(source_url, now)
@@ -405,7 +469,7 @@ def build_episode(args: argparse.Namespace) -> int:
     audio_filename = f"{release_tag}-{slug}.mp3"
     audio_path = out_dir / audio_filename
 
-    asyncio.run(synthesize_audio(text, voice, audio_path))
+    synthesize_audio(text, voice, audio_path)
 
     summary_text = excerpt(text)
     summary_html = "\n".join([f"<p>{html.escape(summary_text)}</p>", source_link_html(source_url)])
@@ -450,7 +514,7 @@ def build_episode(args: argparse.Namespace) -> int:
             "EPISODE_SOURCE_URL": source_url,
         },
     )
-    print(str(episode_json))
+    print(str(episode_json), flush=True)
     return 0
 
 
@@ -554,6 +618,7 @@ def selfcheck(_: argparse.Namespace) -> int:
         feed = (pages_dir / "feed.xml").read_text(encoding="utf-8")
         assert "Newest" in feed
         assert "Older" not in feed
+        assert split_text_for_tts("A\n\nB\n\nC", max_chars=3) == ["A", "B", "C"]
 
     print("selfcheck ok")
     return 0
