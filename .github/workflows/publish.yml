@@ -17,9 +17,11 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: JINA
     env:
       GH_TOKEN: ${{ github.token }}
       GITHUB_TOKEN: ${{ github.token }}
+      JINA_API_KEY: ${{ secrets.JINA }}
       REPO: ${{ github.repository }}
       ARTICLE_URL: ${{ inputs.article_url }}
       LANGUAGE_OVERRIDE: ${{ inputs.language }}

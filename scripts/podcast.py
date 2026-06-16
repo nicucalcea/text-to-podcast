@@ -183,6 +183,59 @@ def download_html(url: str) -> str:
         return response.read().decode(charset, errors="replace")
 
 
+def download_reader_markdown(url: str) -> str:
+    reader_url = f"https://r.jina.ai/http://{url}"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9,ro;q=0.8,ru;q=0.7",
+        "x-engine": "browser",
+        "x-no-cache": "true",
+    }
+    api_key = os.environ.get("JINA_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["x-proxy"] = "auto"
+
+    request = Request(reader_url, headers=headers)
+    with urlopen(request, timeout=60) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
+def markdown_to_text(markdown: str) -> str:
+    # ponytail: plain regex markdown cleanup is intentionally shallow; upgrade to a real markdown renderer if formatting fidelity ever matters.
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", markdown)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[*-]\s+", "• ", text, flags=re.MULTILINE)
+    text = re.sub(r"`{1,3}([^`]*)`{1,3}", r"\1", text)
+    text = text.replace("***", "").replace("**", "").replace("__", "")
+    text = re.sub(r"(?<!\w)[*_](?!\s)(.+?)(?<!\s)[*_](?!\w)", r"\1", text)
+    text = text.replace("_", "").replace("*", "")
+    return clean_text(html.unescape(text))
+
+
+def parse_reader_payload(payload: str, source_url: str) -> dict[str, Any]:
+    title_match = re.search(r"^Title:\s*(.+)$", payload, flags=re.MULTILINE)
+    date_match = re.search(r"^Published Time:\s*(.+)$", payload, flags=re.MULTILINE)
+    image_match = re.search(r"^Image:\s*(.+)$", payload, flags=re.MULTILINE)
+    marker = "Markdown Content:\n"
+    if marker not in payload:
+        raise ValueError("Reader fallback response did not include markdown content")
+    markdown = payload.split(marker, 1)[1].strip()
+    text = markdown_to_text(markdown)
+    return {
+        "title": clean_text(title_match.group(1) if title_match else "") or fallback_title(source_url),
+        "author": "",
+        "date": clean_text(date_match.group(1) if date_match else "") or None,
+        "language": None,
+        "image": clean_text(image_match.group(1) if image_match else "") or None,
+        "text": text,
+        "raw_text": text,
+    }
+
+
 def build_site_url(repo: str) -> str:
     owner, name = repo.split("/", 1)
     if name == f"{owner}.github.io":
@@ -306,22 +359,29 @@ def build_episode(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir)
     ensure_dir(out_dir)
 
+    document: dict[str, Any] | None = None
     downloaded = trafilatura.fetch_url(source_url)
     if not downloaded:
-        downloaded = download_html(source_url)
+        try:
+            downloaded = download_html(source_url)
+        except Exception:
+            downloaded = ""
 
-    document = trafilatura.bare_extraction(
-        downloaded,
-        url=source_url,
-        favor_precision=True,
-        include_comments=False,
-        include_images=True,
-        with_metadata=True,
-    )
+    if downloaded:
+        extracted = trafilatura.bare_extraction(
+            downloaded,
+            url=source_url,
+            favor_precision=True,
+            include_comments=False,
+            include_images=True,
+            with_metadata=True,
+        )
+        if extracted is not None:
+            document = extracted.as_dict() if hasattr(extracted, "as_dict") else extracted
+
     if document is None:
-        raise SystemExit(f"Could not extract article text from: {source_url}")
-    if hasattr(document, "as_dict"):
-        document = document.as_dict()
+        reader_payload = download_reader_markdown(source_url)
+        document = parse_reader_payload(reader_payload, source_url)
 
     text = clean_text(document.get("text") or document.get("raw_text") or "")
     if len(text) < 200:
