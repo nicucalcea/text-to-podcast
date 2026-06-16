@@ -1,17 +1,15 @@
 name: Publish article podcast episode
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       article_url:
         description: Article URL
         required: true
-        type: string
       language:
         description: Optional voice override: en, ro or ru (leave blank for auto-detect)
         required: false
         default: ""
-        type: string
 
 permissions:
   contents: write
