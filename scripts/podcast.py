@@ -16,6 +16,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
+from urllib.request import Request, urlopen
 from xml.sax.saxutils import escape as xml_escape
 
 
@@ -169,6 +170,19 @@ def build_release_tag(source_url: str, now: dt.datetime) -> str:
     return f"episode-{now.strftime('%Y%m%d-%H%M%S')}-{digest}"
 
 
+def download_html(url: str) -> str:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9,ro;q=0.8,ru;q=0.7",
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
 def build_site_url(repo: str) -> str:
     owner, name = repo.split("/", 1)
     if name == f"{owner}.github.io":
@@ -294,7 +308,7 @@ def build_episode(args: argparse.Namespace) -> int:
 
     downloaded = trafilatura.fetch_url(source_url)
     if not downloaded:
-        raise SystemExit(f"Could not download article: {source_url}")
+        downloaded = download_html(source_url)
 
     document = trafilatura.bare_extraction(
         downloaded,
