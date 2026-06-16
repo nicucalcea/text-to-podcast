@@ -1,0 +1,139 @@
+name: Publish article podcast episode
+
+on:
+  workflow_dispatch:
+    inputs:
+      article_url:
+        description: Article URL
+        required: true
+        type: string
+      language:
+        description: Optional voice override: en, ro or ru (leave blank for auto-detect)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ARTICLE_URL: ${{ inputs.article_url }}
+      LANGUAGE_OVERRIDE: ${{ inputs.language }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install edge-tts langdetect trafilatura
+
+      - name: Run self-check
+        run: python scripts/podcast.py selfcheck
+
+      - name: Prepare gh-pages checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git clone --depth 1 --branch gh-pages "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git" gh-pages
+          else
+            mkdir gh-pages
+            cd gh-pages
+            git init
+            git checkout --orphan gh-pages
+            git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          fi
+
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Stop on duplicate article URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python scripts/podcast.py exists --pages-dir gh-pages --url "$ARTICLE_URL"; then
+            echo "Article already exists in the feed" >&2
+            exit 1
+          fi
+
+      - name: Build episode
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/podcast.py build \
+            --url "$ARTICLE_URL" \
+            --language "$LANGUAGE_OVERRIDE" \
+            --out-dir build
+          source build/episode.env
+          {
+            echo "EPISODE_TITLE=$EPISODE_TITLE"
+            echo "EPISODE_RELEASE_TAG=$EPISODE_RELEASE_TAG"
+            echo "EPISODE_AUDIO_PATH=$EPISODE_AUDIO_PATH"
+            echo "EPISODE_AUDIO_FILENAME=$EPISODE_AUDIO_FILENAME"
+            echo "EPISODE_SOURCE_URL=$EPISODE_SOURCE_URL"
+          } >> "$GITHUB_ENV"
+
+      - name: Create GitHub release for audio
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$EPISODE_RELEASE_TAG" "$EPISODE_AUDIO_PATH" \
+            --title "$EPISODE_TITLE" \
+            --notes "Source: $EPISODE_SOURCE_URL"
+
+      - name: Update RSS feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          AUDIO_URL="https://github.com/${REPO}/releases/download/${EPISODE_RELEASE_TAG}/${EPISODE_AUDIO_FILENAME}"
+          python scripts/podcast.py update-feed \
+            --repo "$REPO" \
+            --pages-dir gh-pages \
+            --episode-json build/episode.json \
+            --audio-url "$AUDIO_URL" \
+            --prune-file build/prune-tags.txt \
+            --keep-latest 50 \
+            --release-tag "$EPISODE_RELEASE_TAG"
+
+      - name: Commit and push gh-pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd gh-pages
+          git add .
+          if git diff --cached --quiet; then
+            echo "No feed changes to publish"
+            exit 0
+          fi
+          git commit -m "Publish ${EPISODE_RELEASE_TAG}"
+          git push origin gh-pages
+
+      - name: Delete trimmed releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -s build/prune-tags.txt ]]; then
+            exit 0
+          fi
+          while IFS= read -r tag; do
+            [[ -z "$tag" ]] && continue
+            gh release delete "$tag" --cleanup-tag -y
+          done < build/prune-tags.txt
